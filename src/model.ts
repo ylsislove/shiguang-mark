@@ -1,3 +1,4 @@
+import { coordinateKey } from "./geocoding";
 export type Corner = "tl" | "tr" | "bl" | "br";
 export type Template =
   | "minimal"
@@ -6,7 +7,12 @@ export type Template =
   | "camera"
   | "glass"
   | "paper";
+export interface Coordinates {
+  latitude: number;
+  longitude: number;
+}
 export interface Metadata {
+  coordinates?: Coordinates;
   date: string;
   place: string;
   camera: string;
@@ -25,6 +31,8 @@ export interface Photo {
   height: number;
   meta: Metadata;
   metadataReference?: { name: string; meta: Metadata };
+  resolvedPlace?: { key: string; name: string };
+  placeMode?: "name" | "coordinates";
   date?: string;
   place?: string;
 }
@@ -153,6 +161,7 @@ export function metadataFromTags(t: Record<string, unknown> = {}): Metadata {
     lens: str(t.LensModel),
     params,
     gps,
+    ...(gps ? { coordinates: { latitude: lat, longitude: lon } } : {}),
     source: original
       ? "EXIF 拍摄时间"
       : digitized
@@ -175,9 +184,30 @@ export function photoMetadata(
     lens: reference.lens || p.meta.lens,
     params: reference.params || p.meta.params,
     gps: reference.gps || p.meta.gps,
+    coordinates: reference.gps ? reference.coordinates : p.meta.coordinates,
     source: reference.date ? reference.source : p.meta.source,
     raw: reference.raw,
   };
+}
+export function resolvedPhotoPlace(
+  p: Pick<Photo, "meta" | "metadataReference" | "resolvedPlace">,
+): string {
+  const key = coordinateKey(photoMetadata(p).coordinates);
+  return key && p.resolvedPlace?.key === key ? p.resolvedPlace.name : "";
+}
+export function photoPlace(
+  p: Pick<
+    Photo,
+    "meta" | "metadataReference" | "resolvedPlace" | "placeMode" | "place"
+  >,
+): string {
+  const meta = photoMetadata(p);
+  if (p.placeMode === "coordinates" && meta.gps) return meta.gps;
+  return p.place ?? (resolvedPhotoPlace(p) || meta.place);
+}
+export function applyResolvedPlace(p: Photo, key: string, name: string): Photo {
+  if (coordinateKey(photoMetadata(p).coordinates) !== key) return p;
+  return { ...p, resolvedPlace: { key, name } };
 }
 export function hasPhotoMetadata(meta: Metadata): boolean {
   return Boolean(
@@ -201,12 +231,20 @@ export function attachMetadataReference(
   return { ...p, metadataReference: { name, meta } };
 }
 export function watermarkLines(
-  p: Pick<Photo, "meta" | "metadataReference" | "date" | "place">,
+  p: Pick<
+    Photo,
+    | "meta"
+    | "metadataReference"
+    | "date"
+    | "place"
+    | "resolvedPlace"
+    | "placeMode"
+  >,
   s: Settings,
 ): string[] {
   const meta = photoMetadata(p);
   const date = s.showDate ? formatDate(p.date ?? meta.date, s.dateFormat) : "";
-  const place = s.showPlace ? (p.place ?? meta.place) : "";
+  const place = s.showPlace ? photoPlace(p) : "";
   const camera = s.showCamera ? meta.camera : "";
   const params = s.showParams ? meta.params : "";
   return [date, place, camera, params, s.caption.trim()]

@@ -1,6 +1,6 @@
 # 腾讯云发布与回滚
 
-该应用为纯静态站点。照片不传输给服务器，无需后台数据库、上传接口或 API 密钥。域名 `mark.aayu.today`，独立 Nginx 虚拟主机，不改动已有站点。
+该应用为纯静态站点。照片不传输给服务器，无需后台数据库、上传接口或 API 密钥。地名识别由浏览器在用户点击后直接请求 Photon，仅传输照片坐标。域名 `mark.aayu.today`，独立 Nginx 虚拟主机，不改动已有站点。
 
 1. 将 DNSPod 中 `mark` 的 A 记录指向目标腾讯云服务器公网 IP；检查不存在冲突 CNAME / AAAA。
 2. 运行测试和构建：`npm ci && npm test && npm run build`。
@@ -25,3 +25,9 @@
 提交源码后运行 `./ops/deploy.sh user@server`。脚本先检查 Git 工作区干净，再安装锁定依赖、测试、构建并按提交 SHA 建立发布目录，最后原子切换站点。脚本不修改 DNS、TLS 或其他站点配置。
 
 证书使用 Certbot 已安装的 [Webroot 验证方式](https://eff-certbot.readthedocs.io/en/stable/using.html#webroot)，无需安装 Nginx 插件或停止现有网站。可运行 `certbot renew --cert-name mark.aayu.today --dry-run` 检查续期。
+
+## 地名接口连接策略
+
+`ops/nginx.conf` 的 CSP 仅允许 `connect-src https://photon.komoot.io`，其余资源仍按原策略限制；不需要开启设备定位权限。首次更新到带地名识别的版本时，需要备份并更新该独立站点配置，运行 `nginx -t` 后 reload。常规静态发布脚本仍不自动改动 Nginx 配置。不要只上传新脚本而保留旧的 `connect-src 'none'`，否则浏览器会阻止查询。
+
+接口来源、合理用量与数据处理说明见 README 的“地名与经纬度”。公开服务不提供可用性承诺，服务不可用时应用会保留当前地点，并允许手动填写。

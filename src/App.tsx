@@ -5,10 +5,7 @@ import {
   ImagePlus,
   ShieldCheck,
   Sparkles,
-  ArrowUpDown,
-  ArrowLeftRight,
   Download,
-  Images,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
@@ -34,6 +31,9 @@ import {
   watermarkLines,
   photoMetadata,
   attachMetadataReference,
+  photoPlace,
+  resolvedPhotoPlace,
+  applyResolvedPlace,
   type Settings,
   type Photo,
   type Corner,
@@ -49,6 +49,9 @@ import {
   type PickerWindow,
 } from "./photos";
 import { renderPhoto, exportPhoto } from "./render";
+import { DockWorkspace, LayoutPicker } from "./DockWorkspace";
+import { loadLayout, libraryDirection } from "./layout";
+import { coordinateKey, lookupPlace } from "./geocoding";
 interface DownloadItem {
   url: string;
   name: string;
@@ -59,11 +62,12 @@ export default function App() {
   const [photos, setPhotos] = useState<Photo[]>([]),
     [index, setIndex] = useState(0),
     [settings, setSettings] = useState<Settings>(loadSettings);
-  const [layout, setLayout] = useState<"vertical" | "horizontal">(() =>
-    localStorage.getItem("shiguang-layout") === "horizontal"
-      ? "horizontal"
-      : "vertical",
-  );
+  const [workspaceLayout, setWorkspaceLayout] = useState(loadLayout);
+  const layout = libraryDirection(workspaceLayout);
+  const [geocoding, setGeocoding] = useState<string | null>(null);
+  const [geoErrors, setGeoErrors] = useState<
+    Record<string, { key: string; message: string }>
+  >({});
   const [importing, setImporting] = useState(""),
     [progress, setProgress] = useState(""),
     [dragging, setDragging] = useState(false),
@@ -117,14 +121,14 @@ export default function App() {
   }, [settings]);
   useEffect(() => {
     try {
-      localStorage.setItem("shiguang-layout", layout);
+      localStorage.setItem("shiguang-dock-v1", JSON.stringify(workspaceLayout));
     } catch {}
-  }, [layout]);
+  }, [workspaceLayout]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
       if (
         (e.target as HTMLElement)?.closest(
-          "input,textarea,select,[contenteditable]",
+          "input,textarea,select,[contenteditable],dialog[open]",
         ) ||
         e.altKey ||
         e.metaKey ||
@@ -154,7 +158,7 @@ export default function App() {
       inline: "nearest",
       behavior: "smooth",
     });
-  }, [index, layout]);
+  }, [index, workspaceLayout]);
   useEffect(() => {
     if (!current) {
       setPreviewError("");
@@ -265,6 +269,7 @@ export default function App() {
     }
   }
   async function onDrop(e: DragEvent) {
+    if (!e.dataTransfer.types.includes("Files")) return;
     e.preventDefault();
     setDragging(false);
     if (locked) return;
@@ -282,7 +287,15 @@ export default function App() {
   function editPhoto(key: "date" | "place", value: string) {
     if (!current) return;
     setPhotos((p) =>
-      p.map((x) => (x.id === current.id ? { ...x, [key]: value } : x)),
+      p.map((x) =>
+        x.id === current.id
+          ? {
+              ...x,
+              [key]: value,
+              ...(key === "place" ? { placeMode: "name" as const } : {}),
+            }
+          : x,
+      ),
     );
   }
   function applyToAll() {
@@ -291,10 +304,53 @@ export default function App() {
       p.map((x) => ({
         ...x,
         date: current.date ?? metadata.date,
-        place: current.place ?? metadata.place,
+        place: photoPlace(current),
+        placeMode: "name",
       })),
     );
     setNotice(`已将当前日期、地点应用到 ${photos.length} 张照片`);
+  }
+  async function identifyPlace() {
+    if (!current || locked) return;
+    const target = current;
+    setPhotos((ps) =>
+      ps.map((p) => (p.id === target.id ? { ...p, placeMode: "name" } : p)),
+    );
+    if (resolvedPhotoPlace(target)) return;
+    const coords = photoMetadata(target).coordinates;
+    if (!coords || geocoding) return;
+    const key = coordinateKey(coords);
+    setGeocoding(target.id);
+    setGeoErrors((errors) => ({
+      ...errors,
+      [target.id]: { key, message: "" },
+    }));
+    try {
+      const name = await lookupPlace(coords);
+      setPhotos((ps) =>
+        ps.map((p) =>
+          p.id === target.id ? applyResolvedPlace(p, key, name) : p,
+        ),
+      );
+      if (
+        allPhotos.current.some(
+          (p) =>
+            p.id === target.id &&
+            coordinateKey(photoMetadata(p).coordinates) === key,
+        )
+      )
+        setNotice("已识别地名，可在输入框中修改");
+    } catch (e) {
+      setGeoErrors((errors) => ({
+        ...errors,
+        [target.id]: {
+          key,
+          message: e instanceof Error ? e.message : "地名识别失败，请重试。",
+        },
+      }));
+    } finally {
+      setGeocoding(null);
+    }
   }
   function pickOriginal() {
     if (!current || locked) return;
@@ -421,9 +477,624 @@ export default function App() {
       setProgress("");
     }
   }
+  const libraryPanel = (
+    <aside className="library panel">
+      {!photos.length ? (
+        <div className="library-empty">你的照片会出现在这里</div>
+      ) : (
+        <div className="photo-list" aria-label="照片列表">
+          {photos.map((p, i) => (
+            <div
+              className={"photo-row " + (i === index ? "is-active" : "")}
+              key={p.id}
+            >
+              <button
+                className={"photo-item " + (i === index ? "is-active" : "")}
+                aria-label={`预览 ${p.file.name}`}
+                aria-current={i === index ? "true" : undefined}
+                onClick={() => {
+                  setIndex(i);
+                  setOriginal(false);
+                }}
+              >
+                <span className="thumb-wrap">
+                  <img src={p.thumb} alt="" loading="lazy" />
+                  <span className="photo-number">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                </span>
+                <span className="photo-caption">
+                  <strong title={p.path}>{p.file.name}</strong>
+                  <small>
+                    {p.width} × {p.height}
+                    {!(p.date ?? photoMetadata(p).date) && " · 待补日期"}
+                    {p.metadataReference && " · 已补原图"}
+                  </small>
+                </span>
+              </button>
+              <button
+                className="remove-photo"
+                aria-label={`移除 ${p.file.name}`}
+                disabled={locked}
+                onClick={() => remove(p.id)}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="library-tip">
+        支持多选、拖入照片与文件夹
+        <br />
+        <span>目录选择器中可定位本地路径</span>
+      </div>
+    </aside>
+  );
+  const previewPanel = (
+    <section className="preview-panel panel">
+      <div className="preview-toolbar">
+        <h2>
+          画面预览
+          {current && (
+            <span className="preview-counter">
+              {index + 1} / {photos.length}
+            </span>
+          )}
+        </h2>
+        <span className="preview-key-hint">
+          {layout === "vertical" ? "↑ ↓" : "← →"} 切换照片
+        </span>
+      </div>
+      {!current ? (
+        <div className="empty-stage">
+          <span className="empty-icon">
+            <ImagePlus size={38} />
+          </span>
+          <h2>从一张喜欢的照片开始</h2>
+          <p>拖放照片到这里，或选择一个相册文件夹</p>
+          <button
+            className="primary"
+            disabled={locked}
+            onClick={() => fileInput.current?.click()}
+          >
+            <ImagePlus size={18} /> 选择照片
+          </button>
+          <small>JPG · PNG · WebP · AVIF · 浏览器支持的 HEIC</small>
+        </div>
+      ) : (
+        <>
+          <div
+            className="canvas-stage"
+            onPointerDown={(e) => {
+              touchStart.current = { x: e.clientX, y: e.clientY };
+            }}
+            onPointerUp={(e) => {
+              if (e.pointerType === "mouse" || !touchStart.current) return;
+              const dx = e.clientX - touchStart.current.x,
+                dy = e.clientY - touchStart.current.y;
+              touchStart.current = null;
+              if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy))
+                move(dx < 0 ? 1 : -1);
+            }}
+          >
+            <canvas
+              ref={canvas}
+              aria-label={`${current.file.name} ${original ? "未加水印" : "水印预览"}`}
+            />
+            {rendering && (
+              <span className="render-badge">
+                <Loader2 size={13} className="spin" />
+                更新预览
+              </span>
+            )}
+            {previewError && (
+              <div className="preview-error" role="alert">
+                {previewError}
+              </div>
+            )}
+          </div>
+          <div className="photo-controls">
+            <button
+              aria-label="上一张"
+              disabled={index === 0}
+              onClick={() => move(-1)}
+            >
+              {layout === "vertical" ? (
+                <ChevronUp size={18} />
+              ) : (
+                <ChevronLeft size={18} />
+              )}
+            </button>
+            <span title={current.path}>{current.file.name}</span>
+            <button
+              aria-label="下一张"
+              disabled={index === photos.length - 1}
+              onClick={() => move(1)}
+            >
+              {layout === "vertical" ? (
+                <ChevronDown size={18} />
+              ) : (
+                <ChevronRight size={18} />
+              )}
+            </button>
+            <button
+              aria-pressed={original}
+              className={original ? "compare active" : "compare"}
+              onClick={() => setOriginal((o) => !o)}
+            >
+              <Eye size={15} />
+              {original ? "查看水印" : "对比无水印"}
+            </button>
+          </div>
+        </>
+      )}
+      <div className="preview-footer">
+        <span>
+          {settings.template === "paper"
+            ? "留白相纸会增加底部画布，原图不裁切"
+            : "导出保留原图尺寸，预览按屏幕缩放"}
+        </span>
+        <span>{layout === "vertical" ? "↑ ↓" : "← →"} 切换 · 手机左右滑动</span>
+      </div>
+    </section>
+  );
+  const metadataPanel = current ? (
+    <section className="metadata-panel panel">
+      <div className="module-tools">
+        <div className="metadata-actions">
+          <button
+            className="reference-button"
+            disabled={locked}
+            onClick={pickOriginal}
+          >
+            <ImagePlus size={14} />{" "}
+            {current.metadataReference ? "更换原图" : "补充原图"}
+          </button>
+          <button
+            className="text-button"
+            onClick={() => setShowInfo((v) => !v)}
+            aria-expanded={showInfo}
+          >
+            {showInfo ? "收起详情" : "全部信息"}
+          </button>
+        </div>
+      </div>
+      {current.metadataReference && (
+        <div className="reference-source">
+          <div>
+            <span>已关联原图</span>
+            <strong title={current.metadataReference.name}>
+              {current.metadataReference.name}
+            </strong>
+            <small>仅提取拍摄信息，导出使用当前精修照片</small>
+            {(current.date !== undefined || current.place !== undefined) && (
+              <small>
+                手填日期、地点仍优先；点“恢复读取值”可采用原图信息。
+              </small>
+            )}
+          </div>
+          <button
+            className="text-button"
+            disabled={locked}
+            aria-label="移除关联原图"
+            onClick={() => {
+              setPhotos((ps) =>
+                ps.map((p) =>
+                  p.id === current.id
+                    ? { ...p, metadataReference: undefined }
+                    : p,
+                ),
+              );
+              setNotice("已移除关联，恢复精修照片自带的信息");
+            }}
+          >
+            <X size={14} /> 移除
+          </button>
+        </div>
+      )}
+      <div className="metadata-summary">
+        <span>
+          <Calendar size={15} />
+          {metadata!.date
+            ? metadata!.date.replace("T", " ")
+            : "未读取到拍摄时间"}
+        </span>
+        <span>
+          <Camera size={15} />
+          {metadata!.camera || "未读取到相机信息"}
+        </span>
+        <span>
+          <MapPin size={15} />
+          {metadata!.place || "未读取到拍摄地点"}
+        </span>
+      </div>
+      {!metadata!.date && (
+        <p className="metadata-tip">
+          未读取到拍摄时间。可以补充这张照片的原图自动读取，也可以在水印内容中手动填写。
+        </p>
+      )}
+      <div className="metadata-editor">
+        <label className="field">
+          当前照片的拍摄时间 <span className="field-note">可手动填写</span>
+          <input
+            aria-label="当前照片的拍摄时间"
+            type="datetime-local"
+            step="1"
+            disabled={!current || locked}
+            value={current ? (current.date ?? metadata!.date) : ""}
+            onInput={(e) => editPhoto("date", e.currentTarget.value)}
+            onChange={(e) => editPhoto("date", e.target.value)}
+          />
+        </label>
+        <label className="field">
+          当前照片的地点
+          <input
+            disabled={!current || locked}
+            maxLength={120}
+            placeholder="例如：九寨沟 · 五花海"
+            value={current ? photoPlace(current) : ""}
+            onChange={(e) => editPhoto("place", e.target.value)}
+          />
+        </label>
+        <div className="place-controls">
+          <button
+            disabled={
+              !metadata?.coordinates ||
+              locked ||
+              (!!geocoding && !resolvedPhotoPlace(current))
+            }
+            onClick={() => void identifyPlace()}
+            aria-pressed={
+              current.placeMode !== "coordinates" &&
+              !!resolvedPhotoPlace(current)
+            }
+          >
+            {geocoding === current.id ? (
+              <Loader2 size={14} className="spin" />
+            ) : (
+              <MapPin size={14} />
+            )}
+            {geocoding === current.id
+              ? "正在识别…"
+              : resolvedPhotoPlace(current)
+                ? "显示地名"
+                : "识别地名"}
+          </button>
+          <button
+            disabled={!metadata?.gps || locked}
+            aria-pressed={current.placeMode === "coordinates"}
+            onClick={() =>
+              setPhotos((ps) =>
+                ps.map((p) =>
+                  p.id === current.id ? { ...p, placeMode: "coordinates" } : p,
+                ),
+              )
+            }
+          >
+            显示经纬度
+          </button>
+        </div>
+        {geoErrors[current.id]?.key === coordinateKey(metadata?.coordinates) &&
+          geoErrors[current.id]?.message && (
+            <p className="geo-error" role="alert">
+              {geoErrors[current.id].message}
+            </p>
+          )}
+        {resolvedPhotoPlace(current) && current.place !== undefined && (
+          <button
+            className="text-button"
+            onClick={() =>
+              setPhotos((ps) =>
+                ps.map((p) =>
+                  p.id === current.id
+                    ? { ...p, place: undefined, placeMode: "name" }
+                    : p,
+                ),
+              )
+            }
+          >
+            采用识别地名
+          </button>
+        )}
+        <p className="geo-note">
+          {metadata?.coordinates
+            ? "识别时会把此照片的坐标发送至 Photon，照片不上传。返回附近地名，可自行修改。"
+            : "照片没有 GPS 坐标，可补充原图或手动填写地点。"}{" "}
+          <a href="https://photon.komoot.io/" target="_blank" rel="noreferrer">
+            Photon
+          </a>{" "}
+          ·{" "}
+          <a
+            href="https://www.openstreetmap.org/copyright"
+            target="_blank"
+            rel="noreferrer"
+          >
+            © OpenStreetMap 贡献者
+          </a>
+        </p>
+        <div className="field-actions">
+          <button
+            disabled={!current || locked}
+            className="text-button"
+            onClick={applyToAll}
+          >
+            日期、地点应用到全部
+          </button>
+          <button
+            disabled={!current || locked}
+            className="text-button"
+            onClick={() => {
+              if (current)
+                setPhotos((ps) =>
+                  ps.map((p) =>
+                    p.id === current.id
+                      ? {
+                          ...p,
+                          date: undefined,
+                          place: undefined,
+                          placeMode: "name",
+                        }
+                      : p,
+                  ),
+                );
+            }}
+          >
+            恢复读取值
+          </button>
+        </div>
+      </div>
+      {showInfo && (
+        <div className="metadata-details">
+          <dl>
+            <dt>文件路径</dt>
+            <dd>{current.path}</dd>
+            <dt>尺寸 / 大小</dt>
+            <dd>
+              {current.width} × {current.height} / {mb(current.file.size)}
+            </dd>
+            <dt>日期来源</dt>
+            <dd>
+              {metadata!.source}
+              {current.metadataReference?.meta.date &&
+                ` · ${current.metadataReference.name}`}
+            </dd>
+            {Object.entries(metadata!.raw).map(([k, v]) => (
+              <div className="metadata-row" key={k}>
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+              </div>
+            ))}
+          </dl>
+          <p>
+            {current.metadataReference ? "以上原始字段来自关联原图。" : ""}
+            原始字段直接来自照片；识别地名时仅查询坐标。
+          </p>
+        </div>
+      )}
+    </section>
+  ) : (
+    <div className="module-empty">
+      <Info size={24} />
+      <p>选择一张照片，查看拍摄信息。</p>
+    </div>
+  );
+  const settingsPanel = (
+    <aside className="settings panel">
+      <div className="module-tools settings-tools">
+        <button
+          className="text-button"
+          onClick={() => setSettings({ ...defaults })}
+          title="恢复默认水印设置"
+        >
+          <RotateCcw size={14} />
+          重置
+        </button>
+      </div>
+      <div className="setting-section">
+        <span className="section-label">01 / 选择模板</span>
+        <div className="template-grid">
+          {templates.map((t, i) => (
+            <button
+              className={
+                "template " + (settings.template === t.id ? "selected" : "")
+              }
+              aria-pressed={settings.template === t.id}
+              onClick={() => setTemplate(t.id)}
+              key={t.id}
+              title={t.hint}
+            >
+              <div className={"template-art art-" + i}>
+                <span>{i === 3 ? "50mm · f/1.8" : "2022.02.16"}</span>
+                {settings.template === t.id && <Check size={12} />}
+              </div>
+              <span>{t.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="setting-section">
+        <span className="section-label">02 / 水印内容</span>
+        <div className="field-toggles">
+          {(
+            [
+              ["showDate", "日期"],
+              ["showPlace", "地点"],
+              ["showCamera", "相机"],
+              ["showParams", "参数"],
+            ] as const
+          ).map(([k, label]) => (
+            <label className="check-label" key={k}>
+              <input
+                type="checkbox"
+                checked={settings[k]}
+                onChange={(e) => change(k, e.target.checked)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+        <label className="field">
+          日期格式
+          <select
+            value={settings.dateFormat}
+            onChange={(e) => change("dateFormat", e.target.value)}
+          >
+            <option value="dots">2022.02.16</option>
+            <option value="iso">2022-02-16</option>
+            <option value="cn">2022年2月16日</option>
+            <option value="datetime">2022.02.16 09:52</option>
+          </select>
+        </label>
+        <label className="field">
+          自定义文字 <span className="field-note">全批次通用</span>
+          <input
+            maxLength={120}
+            placeholder="例如：与你走过的每一程"
+            value={settings.caption}
+            onChange={(e) => change("caption", e.target.value)}
+          />
+        </label>
+        {current && (
+          <div
+            className={"content-preview " + (!lines.length ? "missing" : "")}
+          >
+            <span>实际水印内容</span>
+            {lines.length ? (
+              lines.map((l, i) => <p key={i}>{l}</p>)
+            ) : (
+              <p>没有可显示的信息，请补填日期、地点或文字。</p>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="setting-section">
+        <span className="section-label">03 / 位置与样式</span>
+        <div className="position-demo" role="group" aria-label="水印位置">
+          {(
+            [
+              ["tl", "左上"],
+              ["tr", "右上"],
+              ["bl", "左下"],
+              ["br", "右下"],
+            ] as [Corner, string][]
+          ).map(([v, t]) => (
+            <button
+              disabled={settings.template === "paper" && v.startsWith("t")}
+              className={settings.corner === v ? "active" : ""}
+              aria-pressed={settings.corner === v}
+              key={v}
+              onClick={() => change("corner", v)}
+            >
+              {t}
+              {settings.corner === v && <Check size={12} />}
+            </button>
+          ))}
+        </div>
+        {settings.template === "paper" && (
+          <p className="small-hint">相纸模板固定在底部留白，可选择左右对齐。</p>
+        )}
+        {(
+          [
+            ["marginX", "水平边距", 0, 20, 0.5, "%"],
+            ["marginY", "垂直边距", 0, 20, 0.5, "%"],
+            ["size", "文字大小", 1, 6, 0.1, "%"],
+            ["opacity", "不透明度", 10, 100, 1, "%"],
+          ] as const
+        ).map(([key, label, min, max, step, suffix]) => (
+          <label className="range-field" key={key}>
+            <span>
+              {label}
+              <output>
+                {settings[key]}
+                {suffix}
+              </output>
+            </span>
+            <input
+              type="range"
+              aria-label={label}
+              min={min}
+              max={max}
+              step={step}
+              value={settings[key]}
+              disabled={settings.template === "paper" && key === "marginY"}
+              onChange={(e) => change(key, Number(e.target.value))}
+            />
+          </label>
+        ))}
+        <label className="color-field">
+          文字颜色{" "}
+          <input
+            type="color"
+            aria-label="文字颜色"
+            disabled={["paper", "film", "glass"].includes(settings.template)}
+            value={settings.color}
+            onChange={(e) => change("color", e.target.value)}
+          />
+          <span>
+            {["paper", "film", "glass"].includes(settings.template)
+              ? "模板配色"
+              : settings.color.toUpperCase()}
+          </span>
+        </label>
+      </div>
+      <div className="setting-section">
+        <span className="section-label">04 / 导出设置</span>
+        <div className="export-fields">
+          <label className="field">
+            文件格式
+            <select
+              value={settings.format}
+              onChange={(e) =>
+                change("format", e.target.value as Settings["format"])
+              }
+            >
+              <option value="image/jpeg">JPG</option>
+              <option value="image/png">PNG（无损）</option>
+              <option value="image/webp">WebP</option>
+            </select>
+          </label>
+          <label className="field">
+            质量
+            <select
+              disabled={settings.format === "image/png"}
+              value={settings.quality}
+              onChange={(e) => change("quality", Number(e.target.value))}
+            >
+              <option value={100}>100%</option>
+              <option value={95}>95% 推荐</option>
+              <option value={85}>85% 小体积</option>
+              <option value={75}>75%</option>
+            </select>
+          </label>
+        </div>
+        <button
+          className="export-single"
+          disabled={!current || locked}
+          onClick={() => void exportImages(false)}
+        >
+          <Download size={16} />
+          导出当前照片
+        </button>
+        {downloads.length > 0 && (
+          <button
+            className="text-button"
+            onClick={() => dialog.current?.showModal()}
+          >
+            查看已生成文件 ({downloads.length})
+          </button>
+        )}
+      </div>
+      <div className="note">
+        <ShieldCheck size={15} />{" "}
+        照片只在本机处理，原文件不会改动。导出文件不携带原始
+        EXIF；已显示在水印里的内容会保留。
+      </div>
+    </aside>
+  );
   return (
     <div
-      className={"app layout-" + layout}
+      className={"app dock-app library-" + layout}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("Files")) {
           e.preventDefault();
@@ -494,26 +1165,9 @@ export default function App() {
             <FolderOpen size={16} /> 选择文件夹
           </button>
         </div>
-        <div className="segmented" aria-label="浏览布局">
-          <button
-            className={layout === "vertical" ? "active" : ""}
-            aria-pressed={layout === "vertical"}
-            onClick={() => setLayout("vertical")}
-          >
-            <ArrowUpDown size={16} />
-            纵向浏览
-          </button>
-          <button
-            className={layout === "horizontal" ? "active" : ""}
-            aria-pressed={layout === "horizontal"}
-            onClick={() => setLayout("horizontal")}
-          >
-            <ArrowLeftRight size={16} />
-            横向浏览
-          </button>
-        </div>
+        <LayoutPicker layout={workspaceLayout} onChange={setWorkspaceLayout} />
         <span className="privacy">
-          <ShieldCheck size={15} /> 本地处理
+          <ShieldCheck size={15} /> 照片本地处理
         </span>
         <a
           className="project-link"
@@ -562,554 +1216,19 @@ export default function App() {
           </button>
         </div>
       )}
-      <div className="workspace">
-        <aside className="library panel">
-          <div className="panel-heading">
-            <h2>
-              照片库 <span className="count">{photos.length}</span>
-            </h2>
-            <Images size={18} />
-          </div>
-          {!photos.length ? (
-            <div className="library-empty">你的照片会出现在这里</div>
-          ) : (
-            <div className="photo-list" aria-label="照片列表">
-              {photos.map((p, i) => (
-                <div
-                  className={"photo-row " + (i === index ? "is-active" : "")}
-                  key={p.id}
-                >
-                  <button
-                    className={"photo-item " + (i === index ? "is-active" : "")}
-                    aria-label={`预览 ${p.file.name}`}
-                    aria-current={i === index ? "true" : undefined}
-                    onClick={() => {
-                      setIndex(i);
-                      setOriginal(false);
-                    }}
-                  >
-                    <span className="thumb-wrap">
-                      <img src={p.thumb} alt="" loading="lazy" />
-                      <span className="photo-number">
-                        {String(i + 1).padStart(2, "0")}
-                      </span>
-                    </span>
-                    <span className="photo-caption">
-                      <strong title={p.path}>{p.file.name}</strong>
-                      <small>
-                        {p.width} × {p.height}
-                        {!(p.date ?? photoMetadata(p).date) && " · 待补日期"}
-                        {p.metadataReference && " · 已补原图"}
-                      </small>
-                    </span>
-                  </button>
-                  <button
-                    className="remove-photo"
-                    aria-label={`移除 ${p.file.name}`}
-                    disabled={locked}
-                    onClick={() => remove(p.id)}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="library-tip">
-            支持多选、拖入照片与文件夹
-            <br />
-            <span>目录选择器中可定位本地路径</span>
-          </div>
-        </aside>
-        <main className="preview-column">
-          <section className="preview-panel panel">
-            <div className="preview-toolbar">
-              <h2>
-                画面预览
-                {current && (
-                  <span className="preview-counter">
-                    {index + 1} / {photos.length}
-                  </span>
-                )}
-              </h2>
-              <span className="preview-key-hint">
-                {layout === "vertical" ? "↑ ↓" : "← →"} 切换照片
-              </span>
-            </div>
-            {!current ? (
-              <div className="empty-stage">
-                <span className="empty-icon">
-                  <ImagePlus size={38} />
-                </span>
-                <h2>从一张喜欢的照片开始</h2>
-                <p>拖放照片到这里，或选择一个相册文件夹</p>
-                <button
-                  className="primary"
-                  disabled={locked}
-                  onClick={() => fileInput.current?.click()}
-                >
-                  <ImagePlus size={18} /> 选择照片
-                </button>
-                <small>JPG · PNG · WebP · AVIF · 浏览器支持的 HEIC</small>
-              </div>
-            ) : (
-              <>
-                <div
-                  className="canvas-stage"
-                  onPointerDown={(e) => {
-                    touchStart.current = { x: e.clientX, y: e.clientY };
-                  }}
-                  onPointerUp={(e) => {
-                    if (e.pointerType === "mouse" || !touchStart.current)
-                      return;
-                    const dx = e.clientX - touchStart.current.x,
-                      dy = e.clientY - touchStart.current.y;
-                    touchStart.current = null;
-                    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy))
-                      move(dx < 0 ? 1 : -1);
-                  }}
-                >
-                  <canvas
-                    ref={canvas}
-                    aria-label={`${current.file.name} ${original ? "未加水印" : "水印预览"}`}
-                  />
-                  {rendering && (
-                    <span className="render-badge">
-                      <Loader2 size={13} className="spin" />
-                      更新预览
-                    </span>
-                  )}
-                  {previewError && (
-                    <div className="preview-error" role="alert">
-                      {previewError}
-                    </div>
-                  )}
-                </div>
-                <div className="photo-controls">
-                  <button
-                    aria-label="上一张"
-                    disabled={index === 0}
-                    onClick={() => move(-1)}
-                  >
-                    {layout === "vertical" ? (
-                      <ChevronUp size={18} />
-                    ) : (
-                      <ChevronLeft size={18} />
-                    )}
-                  </button>
-                  <span title={current.path}>{current.file.name}</span>
-                  <button
-                    aria-label="下一张"
-                    disabled={index === photos.length - 1}
-                    onClick={() => move(1)}
-                  >
-                    {layout === "vertical" ? (
-                      <ChevronDown size={18} />
-                    ) : (
-                      <ChevronRight size={18} />
-                    )}
-                  </button>
-                  <button
-                    aria-pressed={original}
-                    className={original ? "compare active" : "compare"}
-                    onClick={() => setOriginal((o) => !o)}
-                  >
-                    <Eye size={15} />
-                    {original ? "查看水印" : "对比无水印"}
-                  </button>
-                </div>
-              </>
-            )}
-            <div className="preview-footer">
-              <span>
-                {settings.template === "paper"
-                  ? "留白相纸会增加底部画布，原图不裁切"
-                  : "导出保留原图尺寸，预览按屏幕缩放"}
-              </span>
-              <span>
-                {layout === "vertical" ? "↑ ↓" : "← →"} 切换 · 手机左右滑动
-              </span>
-            </div>
-          </section>
-          {current && (
-            <section className="metadata-panel panel">
-              <div className="panel-heading">
-                <h2>
-                  <Info size={16} /> 拍摄信息
-                </h2>
-                <div className="metadata-actions">
-                  <button
-                    className="reference-button"
-                    disabled={locked}
-                    onClick={pickOriginal}
-                  >
-                    <ImagePlus size={14} />{" "}
-                    {current.metadataReference ? "更换原图" : "补充原图"}
-                  </button>
-                  <button
-                    className="text-button"
-                    onClick={() => setShowInfo((v) => !v)}
-                    aria-expanded={showInfo}
-                  >
-                    {showInfo ? "收起详情" : "全部信息"}
-                  </button>
-                </div>
-              </div>
-              {current.metadataReference && (
-                <div className="reference-source">
-                  <div>
-                    <span>已关联原图</span>
-                    <strong title={current.metadataReference.name}>
-                      {current.metadataReference.name}
-                    </strong>
-                    <small>仅提取拍摄信息，导出使用当前精修照片</small>
-                    {(current.date !== undefined ||
-                      current.place !== undefined) && (
-                      <small>
-                        手填日期、地点仍优先；点“恢复读取值”可采用原图信息。
-                      </small>
-                    )}
-                  </div>
-                  <button
-                    className="text-button"
-                    disabled={locked}
-                    aria-label="移除关联原图"
-                    onClick={() => {
-                      setPhotos((ps) =>
-                        ps.map((p) =>
-                          p.id === current.id
-                            ? { ...p, metadataReference: undefined }
-                            : p,
-                        ),
-                      );
-                      setNotice("已移除关联，恢复精修照片自带的信息");
-                    }}
-                  >
-                    <X size={14} /> 移除
-                  </button>
-                </div>
-              )}
-              <div className="metadata-summary">
-                <span>
-                  <Calendar size={15} />
-                  {metadata!.date
-                    ? metadata!.date.replace("T", " ")
-                    : "未读取到拍摄时间"}
-                </span>
-                <span>
-                  <Camera size={15} />
-                  {metadata!.camera || "未读取到相机信息"}
-                </span>
-                <span>
-                  <MapPin size={15} />
-                  {metadata!.place || "未读取到拍摄地点"}
-                </span>
-              </div>
-              {!metadata!.date && (
-                <p className="metadata-tip">
-                  未读取到拍摄时间。可以补充这张照片的原图自动读取，也可以在水印内容中手动填写。
-                </p>
-              )}
-              {showInfo && (
-                <div className="metadata-details">
-                  <dl>
-                    <dt>文件路径</dt>
-                    <dd>{current.path}</dd>
-                    <dt>尺寸 / 大小</dt>
-                    <dd>
-                      {current.width} × {current.height} /{" "}
-                      {mb(current.file.size)}
-                    </dd>
-                    <dt>日期来源</dt>
-                    <dd>
-                      {metadata!.source}
-                      {current.metadataReference?.meta.date &&
-                        ` · ${current.metadataReference.name}`}
-                    </dd>
-                    {Object.entries(metadata!.raw).map(([k, v]) => (
-                      <div className="metadata-row" key={k}>
-                        <dt>{k}</dt>
-                        <dd>{v}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                  <p>
-                    {current.metadataReference
-                      ? "以上原始字段来自关联原图。"
-                      : ""}
-                    只读取照片自带的位置名称或 GPS 坐标，不联网查询地址。
-                  </p>
-                </div>
-              )}
-            </section>
-          )}
-        </main>
-        <aside className="settings panel">
-          <div className="panel-heading">
-            <h2>水印设计</h2>
-            <button
-              className="text-button"
-              onClick={() => setSettings({ ...defaults })}
-              title="恢复默认水印设置"
-            >
-              <RotateCcw size={14} />
-              重置
-            </button>
-          </div>
-          <div className="setting-section">
-            <span className="section-label">01 / 选择模板</span>
-            <div className="template-grid">
-              {templates.map((t, i) => (
-                <button
-                  className={
-                    "template " + (settings.template === t.id ? "selected" : "")
-                  }
-                  aria-pressed={settings.template === t.id}
-                  onClick={() => setTemplate(t.id)}
-                  key={t.id}
-                  title={t.hint}
-                >
-                  <div className={"template-art art-" + i}>
-                    <span>{i === 3 ? "50mm · f/1.8" : "2022.02.16"}</span>
-                    {settings.template === t.id && <Check size={12} />}
-                  </div>
-                  <span>{t.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="setting-section">
-            <span className="section-label">02 / 水印内容</span>
-            <div className="field-toggles">
-              {(
-                [
-                  ["showDate", "日期"],
-                  ["showPlace", "地点"],
-                  ["showCamera", "相机"],
-                  ["showParams", "参数"],
-                ] as const
-              ).map(([k, label]) => (
-                <label className="check-label" key={k}>
-                  <input
-                    type="checkbox"
-                    checked={settings[k]}
-                    onChange={(e) => change(k, e.target.checked)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
-            <label className="field">
-              日期格式
-              <select
-                value={settings.dateFormat}
-                onChange={(e) => change("dateFormat", e.target.value)}
-              >
-                <option value="dots">2022.02.16</option>
-                <option value="iso">2022-02-16</option>
-                <option value="cn">2022年2月16日</option>
-                <option value="datetime">2022.02.16 09:52</option>
-              </select>
-            </label>
-            <label className="field">
-              当前照片的拍摄时间 <span className="field-note">可手动填写</span>
-              <input
-                aria-label="当前照片的拍摄时间"
-                type="datetime-local"
-                step="1"
-                disabled={!current || locked}
-                value={current ? (current.date ?? metadata!.date) : ""}
-                onInput={(e) => editPhoto("date", e.currentTarget.value)}
-                onChange={(e) => editPhoto("date", e.target.value)}
-              />
-            </label>
-            <label className="field">
-              当前照片的地点
-              <input
-                disabled={!current || locked}
-                maxLength={120}
-                placeholder="例如：九寨沟 · 五花海"
-                value={current ? (current.place ?? metadata!.place) : ""}
-                onChange={(e) => editPhoto("place", e.target.value)}
-              />
-            </label>
-            <div className="field-actions">
-              <button
-                disabled={!current || locked}
-                className="text-button"
-                onClick={applyToAll}
-              >
-                日期、地点应用到全部
-              </button>
-              <button
-                disabled={!current || locked}
-                className="text-button"
-                onClick={() => {
-                  if (current)
-                    setPhotos((ps) =>
-                      ps.map((p) =>
-                        p.id === current.id
-                          ? { ...p, date: undefined, place: undefined }
-                          : p,
-                      ),
-                    );
-                }}
-              >
-                恢复读取值
-              </button>
-            </div>
-            <label className="field">
-              自定义文字 <span className="field-note">全批次通用</span>
-              <input
-                maxLength={120}
-                placeholder="例如：与你走过的每一程"
-                value={settings.caption}
-                onChange={(e) => change("caption", e.target.value)}
-              />
-            </label>
-            {current && (
-              <div
-                className={
-                  "content-preview " + (!lines.length ? "missing" : "")
-                }
-              >
-                <span>实际水印内容</span>
-                {lines.length ? (
-                  lines.map((l, i) => <p key={i}>{l}</p>)
-                ) : (
-                  <p>没有可显示的信息，请补填日期、地点或文字。</p>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="setting-section">
-            <span className="section-label">03 / 位置与样式</span>
-            <div className="position-demo" role="group" aria-label="水印位置">
-              {(
-                [
-                  ["tl", "左上"],
-                  ["tr", "右上"],
-                  ["bl", "左下"],
-                  ["br", "右下"],
-                ] as [Corner, string][]
-              ).map(([v, t]) => (
-                <button
-                  disabled={settings.template === "paper" && v.startsWith("t")}
-                  className={settings.corner === v ? "active" : ""}
-                  aria-pressed={settings.corner === v}
-                  key={v}
-                  onClick={() => change("corner", v)}
-                >
-                  {t}
-                  {settings.corner === v && <Check size={12} />}
-                </button>
-              ))}
-            </div>
-            {settings.template === "paper" && (
-              <p className="small-hint">
-                相纸模板固定在底部留白，可选择左右对齐。
-              </p>
-            )}
-            {(
-              [
-                ["marginX", "水平边距", 0, 20, 0.5, "%"],
-                ["marginY", "垂直边距", 0, 20, 0.5, "%"],
-                ["size", "文字大小", 1, 6, 0.1, "%"],
-                ["opacity", "不透明度", 10, 100, 1, "%"],
-              ] as const
-            ).map(([key, label, min, max, step, suffix]) => (
-              <label className="range-field" key={key}>
-                <span>
-                  {label}
-                  <output>
-                    {settings[key]}
-                    {suffix}
-                  </output>
-                </span>
-                <input
-                  type="range"
-                  aria-label={label}
-                  min={min}
-                  max={max}
-                  step={step}
-                  value={settings[key]}
-                  disabled={settings.template === "paper" && key === "marginY"}
-                  onChange={(e) => change(key, Number(e.target.value))}
-                />
-              </label>
-            ))}
-            <label className="color-field">
-              文字颜色{" "}
-              <input
-                type="color"
-                aria-label="文字颜色"
-                disabled={["paper", "film", "glass"].includes(
-                  settings.template,
-                )}
-                value={settings.color}
-                onChange={(e) => change("color", e.target.value)}
-              />
-              <span>
-                {["paper", "film", "glass"].includes(settings.template)
-                  ? "模板配色"
-                  : settings.color.toUpperCase()}
-              </span>
-            </label>
-          </div>
-          <div className="setting-section">
-            <span className="section-label">04 / 导出设置</span>
-            <div className="export-fields">
-              <label className="field">
-                文件格式
-                <select
-                  value={settings.format}
-                  onChange={(e) =>
-                    change("format", e.target.value as Settings["format"])
-                  }
-                >
-                  <option value="image/jpeg">JPG</option>
-                  <option value="image/png">PNG（无损）</option>
-                  <option value="image/webp">WebP</option>
-                </select>
-              </label>
-              <label className="field">
-                质量
-                <select
-                  disabled={settings.format === "image/png"}
-                  value={settings.quality}
-                  onChange={(e) => change("quality", Number(e.target.value))}
-                >
-                  <option value={100}>100%</option>
-                  <option value={95}>95% 推荐</option>
-                  <option value={85}>85% 小体积</option>
-                  <option value={75}>75%</option>
-                </select>
-              </label>
-            </div>
-            <button
-              className="export-single"
-              disabled={!current || locked}
-              onClick={() => void exportImages(false)}
-            >
-              <Download size={16} />
-              导出当前照片
-            </button>
-            {downloads.length > 0 && (
-              <button
-                className="text-button"
-                onClick={() => dialog.current?.showModal()}
-              >
-                查看已生成文件 ({downloads.length})
-              </button>
-            )}
-          </div>
-          <div className="note">
-            <ShieldCheck size={15} />{" "}
-            照片只在本机处理，原文件不会改动。导出文件不携带原始
-            EXIF；已显示在水印里的内容会保留。
-          </div>
-        </aside>
-      </div>
+      <>
+        <DockWorkspace
+          layout={workspaceLayout}
+          onChange={setWorkspaceLayout}
+          panels={{
+            library: libraryPanel,
+            metadata: metadataPanel,
+            settings: settingsPanel,
+          }}
+          preview={previewPanel}
+          photoCount={photos.length}
+        />
+      </>
       {notice && (
         <div className="toast" role="status">
           <Check size={16} />
