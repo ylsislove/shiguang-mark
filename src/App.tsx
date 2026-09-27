@@ -142,13 +142,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", fn);
   }, [layout, photos.length]);
   useEffect(() => {
-    document
-      .querySelector(".photo-item.is-active")
-      ?.scrollIntoView({
-        block: "nearest",
-        inline: "nearest",
-        behavior: "smooth",
-      });
+    document.querySelector(".photo-item.is-active")?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+      behavior: "smooth",
+    });
   }, [index, layout]);
   useEffect(() => {
     if (!current) {
