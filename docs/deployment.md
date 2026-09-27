@@ -6,8 +6,8 @@
 2. 运行测试和构建：`npm ci && npm test && npm run build`。
 3. 将 `dist/` 内容复制到 `/var/www/mark.aayu.today/releases/<git-commit>/`。
 4. 在 `/var/www/mark.aayu.today/` 创建临时符号链接，再原子切换 `current` 到新 release；保留旧版本以便回滚。
-5. 安装 `ops/nginx.conf` 到单独的站点配置，运行 `nginx -t`，成功后 reload。
-6. 公网 DNS 生效后用 Certbot Nginx 插件签发 `mark.aayu.today` 证书并开启 HTTP → HTTPS 重定向，保持系统自动续期计时器。
+5. 首次安装先创建 `/var/www/mark.aayu.today/acme/.well-known/acme-challenge`，将 `ops/nginx.bootstrap.conf` 安装到 `/etc/nginx/sites-available/mark.aayu.today`，在 `sites-enabled` 建立链接，运行 `nginx -t`，成功后 reload。
+6. 公网 DNS 生效后运行 `certbot certonly --webroot -w /var/www/mark.aayu.today/acme -d mark.aayu.today` 签发证书，再以 `ops/nginx.conf` 替换该独立配置，`nginx -t` 成功后 reload。这会启用 HTTPS 与 HTTP 重定向；验证目录独立于版本目录，以便自动续期。保持 `certbot.timer` 启用，部署钩子在续期后执行 `nginx -t && systemctl reload nginx`。
 7. 检查 HTTPS 首页与资源 HTTP 200、有效证书、浏览器导入/导出，以及已有站点仍按原有访问规则工作。
 
 回滚：把 `current` 原子切回已知正常的 release 即可。源码与构建记录通过 GitHub CI 管理。DNS 凭据只应保存在本机仓库外，部署文件不包含私钥或账户令牌。
@@ -23,3 +23,5 @@
 ## 更新已上线站点
 
 提交源码后运行 `./ops/deploy.sh user@server`。脚本先检查 Git 工作区干净，再安装锁定依赖、测试、构建并按提交 SHA 建立发布目录，最后原子切换站点。脚本不修改 DNS、TLS 或其他站点配置。
+
+证书使用 Certbot 已安装的 [Webroot 验证方式](https://eff-certbot.readthedocs.io/en/stable/using.html#webroot)，无需安装 Nginx 插件或停止现有网站。可运行 `certbot renew --cert-name mark.aayu.today --dry-run` 检查续期。

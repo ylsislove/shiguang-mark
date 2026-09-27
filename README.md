@@ -39,7 +39,7 @@ npm run build
 
 ## 发布
 
-正式站点目标：`https://mark.aayu.today`。域名解析与 HTTPS 配置参见 [部署说明](docs/deployment.md)。自动检查工作流在 push 和 pull request 时运行测试与构建。
+正式站点：[mark.aayu.today](https://mark.aayu.today)。域名解析与 HTTPS 配置参见 [部署说明](docs/deployment.md)。自动检查工作流在 push 和 pull request 时运行测试与构建。
 
 遵循项目要求，正式部署使用腾讯云，未启用 GitHub Pages。技术上完整核心功能也适用于 GitHub Pages，因为它们无需服务器端运行；选择文件夹仍需要用户授权。
 
