@@ -121,7 +121,7 @@ export default function App() {
   }, [settings]);
   useEffect(() => {
     try {
-      localStorage.setItem("shiguang-dock-v1", JSON.stringify(workspaceLayout));
+      localStorage.setItem("shiguang-dock-v2", JSON.stringify(workspaceLayout));
     } catch {}
   }, [workspaceLayout]);
   useEffect(() => {
