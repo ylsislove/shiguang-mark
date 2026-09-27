@@ -32,6 +32,8 @@ import {
   loadSettings,
   exportName,
   watermarkLines,
+  photoMetadata,
+  attachMetadataReference,
   type Settings,
   type Photo,
   type Corner,
@@ -39,6 +41,8 @@ import {
 } from "./model";
 import {
   readPhoto,
+  readMetadata,
+  isMetadataPhoto,
   isPhoto,
   droppedFiles,
   folderFiles,
@@ -73,6 +77,8 @@ export default function App() {
   const canvas = useRef<HTMLCanvasElement>(null),
     fileInput = useRef<HTMLInputElement>(null),
     folderInput = useRef<HTMLInputElement>(null),
+    originalInput = useRef<HTMLInputElement>(null),
+    originalTarget = useRef<string | null>(null),
     cancel = useRef(false),
     busy = useRef(false),
     allPhotos = useRef<Photo[]>([]),
@@ -80,6 +86,7 @@ export default function App() {
     dialog = useRef<HTMLDialogElement>(null),
     touchStart = useRef<{ x: number; y: number } | null>(null);
   const current = photos[index];
+  const metadata = current ? photoMetadata(current) : undefined;
   const locked = Boolean(importing || progress);
   const lines = current ? watermarkLines(current, settings) : [];
   function change<K extends keyof Settings>(key: K, value: Settings[K]) {
@@ -279,15 +286,55 @@ export default function App() {
     );
   }
   function applyToAll() {
-    if (!current) return;
+    if (!current || !metadata) return;
     setPhotos((p) =>
       p.map((x) => ({
         ...x,
-        date: current.date ?? current.meta.date,
-        place: current.place ?? current.meta.place,
+        date: current.date ?? metadata.date,
+        place: current.place ?? metadata.place,
       })),
     );
     setNotice(`已将当前日期、地点应用到 ${photos.length} 张照片`);
+  }
+  function pickOriginal() {
+    if (!current || locked) return;
+    originalTarget.current = current.id;
+    originalInput.current?.click();
+  }
+  async function supplementOriginal(file?: File) {
+    const target = photos.find((p) => p.id === originalTarget.current);
+    if (!file || !target || busy.current || locked) return;
+    busy.current = true;
+    setImporting(`读取原图信息 · ${file.name}`);
+    setMessages([]);
+    try {
+      if (!isMetadataPhoto(file))
+        throw new Error(
+          "请选择 JPG、PNG、WebP、AVIF、HEIC/HEIF 或 TIFF 原图。",
+        );
+      const linked = attachMetadataReference(
+        target,
+        file.name,
+        await readMetadata(file),
+      );
+      setPhotos((ps) =>
+        ps.map((p) =>
+          p.id === target.id
+            ? { ...p, metadataReference: linked.metadataReference }
+            : p,
+        ),
+      );
+      setNotice(`已为「${target.file.name}」补充原图信息`);
+    } catch (error) {
+      setMessages([
+        error instanceof Error ? error.message : "原图信息读取失败，请重试。",
+      ]);
+    } finally {
+      busy.current = false;
+      setImporting("");
+      originalTarget.current = null;
+      if (originalInput.current) originalInput.current.value = "";
+    }
   }
   function remove(id: string) {
     const p = photos.find((x) => x.id === id);
@@ -419,35 +466,74 @@ export default function App() {
           )
         }
       />
-      <header>
+      <input
+        hidden
+        ref={originalInput}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif,image/tiff,.heic,.heif,.tif,.tiff"
+        onChange={(e) => void supplementOriginal(e.target.files?.[0])}
+      />
+      <header className="app-toolbar">
         <a className="brand" href="./" aria-label="时光印首页">
           <span className="brand-icon">
-            <Camera />
+            <Camera size={20} />
           </span>
-          <span>
-            时光印<small>PHOTO WATERMARK</small>
-          </span>
+          <h1>
+            时光印<span>照片水印工作台</span>
+          </h1>
         </a>
-        <div className="privacy">
-          <ShieldCheck size={16} /> 照片留在你的设备里
+        <div className="toolbar-imports">
+          <button
+            className="import-button"
+            disabled={locked}
+            onClick={() => fileInput.current?.click()}
+          >
+            <ImagePlus size={16} /> 添加照片
+          </button>
+          <button disabled={locked} onClick={() => void pickFolder()}>
+            <FolderOpen size={16} /> 选择文件夹
+          </button>
         </div>
+        <div className="segmented" aria-label="浏览布局">
+          <button
+            className={layout === "vertical" ? "active" : ""}
+            aria-pressed={layout === "vertical"}
+            onClick={() => setLayout("vertical")}
+          >
+            <ArrowUpDown size={16} />
+            纵向浏览
+          </button>
+          <button
+            className={layout === "horizontal" ? "active" : ""}
+            aria-pressed={layout === "horizontal"}
+            onClick={() => setLayout("horizontal")}
+          >
+            <ArrowLeftRight size={16} />
+            横向浏览
+          </button>
+        </div>
+        <span className="privacy">
+          <ShieldCheck size={15} /> 本地处理
+        </span>
+        <a
+          className="project-link"
+          href="https://github.com/ylsislove/shiguang-mark"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="开源项目"
+          title="开源项目"
+        >
+          <ExternalLink size={16} />
+        </a>
         <button
-          className="primary"
+          className="primary toolbar-export"
           disabled={!photos.length || locked}
           onClick={() => void exportImages(true)}
         >
-          <Download size={17} /> 批量导出
+          <Download size={16} /> 批量导出
           {photos.length > 0 && ` (${photos.length})`}
         </button>
       </header>
-      <div className="intro">
-        <div>
-          <span className="eyebrow">YOUR MOMENTS, BEAUTIFULLY MARKED</span>
-          <h1>给回忆，留下时间。</h1>
-          <p>选好照片，加上日期，让每个瞬间都有迹可循。</p>
-        </div>
-        <span className="version">本地处理 · 原尺寸导出</span>
-      </div>
       {(importing || progress) && (
         <div className="status-banner" role="status">
           <Loader2 className="spin" size={17} />
@@ -484,22 +570,6 @@ export default function App() {
             </h2>
             <Images size={18} />
           </div>
-          <div className="import-actions">
-            <button
-              className="import-button"
-              disabled={locked}
-              onClick={() => fileInput.current?.click()}
-            >
-              <ImagePlus size={18} /> 添加照片
-            </button>
-            <button
-              className="folder-button"
-              disabled={locked}
-              onClick={() => void pickFolder()}
-            >
-              <FolderOpen size={17} /> 选择文件夹
-            </button>
-          </div>
           {!photos.length ? (
             <div className="library-empty">你的照片会出现在这里</div>
           ) : (
@@ -528,7 +598,8 @@ export default function App() {
                       <strong title={p.path}>{p.file.name}</strong>
                       <small>
                         {p.width} × {p.height}
-                        {!(p.date ?? p.meta.date) && " · 待补日期"}
+                        {!(p.date ?? photoMetadata(p).date) && " · 待补日期"}
+                        {p.metadataReference && " · 已补原图"}
                       </small>
                     </span>
                   </button>
@@ -561,24 +632,9 @@ export default function App() {
                   </span>
                 )}
               </h2>
-              <div className="segmented" aria-label="浏览布局">
-                <button
-                  className={layout === "vertical" ? "active" : ""}
-                  aria-pressed={layout === "vertical"}
-                  onClick={() => setLayout("vertical")}
-                >
-                  <ArrowUpDown size={16} />
-                  纵向浏览
-                </button>
-                <button
-                  className={layout === "horizontal" ? "active" : ""}
-                  aria-pressed={layout === "horizontal"}
-                  onClick={() => setLayout("horizontal")}
-                >
-                  <ArrowLeftRight size={16} />
-                  横向浏览
-                </button>
-              </div>
+              <span className="preview-key-hint">
+                {layout === "vertical" ? "↑ ↓" : "← →"} 切换照片
+              </span>
             </div>
             {!current ? (
               <div className="empty-stage">
@@ -615,7 +671,7 @@ export default function App() {
                 >
                   <canvas
                     ref={canvas}
-                    aria-label={`${current.file.name} ${original ? "原图" : "水印预览"}`}
+                    aria-label={`${current.file.name} ${original ? "未加水印" : "水印预览"}`}
                   />
                   {rendering && (
                     <span className="render-badge">
@@ -659,7 +715,7 @@ export default function App() {
                     onClick={() => setOriginal((o) => !o)}
                   >
                     <Eye size={15} />
-                    {original ? "查看水印" : "对比原图"}
+                    {original ? "查看水印" : "对比无水印"}
                   </button>
                 </div>
               </>
@@ -681,33 +737,77 @@ export default function App() {
                 <h2>
                   <Info size={16} /> 拍摄信息
                 </h2>
-                <button
-                  className="text-button"
-                  onClick={() => setShowInfo((v) => !v)}
-                  aria-expanded={showInfo}
-                >
-                  {showInfo ? "收起详情" : "全部信息"}
-                </button>
+                <div className="metadata-actions">
+                  <button
+                    className="reference-button"
+                    disabled={locked}
+                    onClick={pickOriginal}
+                  >
+                    <ImagePlus size={14} />{" "}
+                    {current.metadataReference ? "更换原图" : "补充原图"}
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => setShowInfo((v) => !v)}
+                    aria-expanded={showInfo}
+                  >
+                    {showInfo ? "收起详情" : "全部信息"}
+                  </button>
+                </div>
               </div>
+              {current.metadataReference && (
+                <div className="reference-source">
+                  <div>
+                    <span>已关联原图</span>
+                    <strong title={current.metadataReference.name}>
+                      {current.metadataReference.name}
+                    </strong>
+                    <small>仅提取拍摄信息，导出使用当前精修照片</small>
+                    {(current.date !== undefined ||
+                      current.place !== undefined) && (
+                      <small>
+                        手填日期、地点仍优先；点“恢复读取值”可采用原图信息。
+                      </small>
+                    )}
+                  </div>
+                  <button
+                    className="text-button"
+                    disabled={locked}
+                    aria-label="移除关联原图"
+                    onClick={() => {
+                      setPhotos((ps) =>
+                        ps.map((p) =>
+                          p.id === current.id
+                            ? { ...p, metadataReference: undefined }
+                            : p,
+                        ),
+                      );
+                      setNotice("已移除关联，恢复精修照片自带的信息");
+                    }}
+                  >
+                    <X size={14} /> 移除
+                  </button>
+                </div>
+              )}
               <div className="metadata-summary">
                 <span>
                   <Calendar size={15} />
-                  {current.meta.date
-                    ? current.meta.date.replace("T", " ")
+                  {metadata!.date
+                    ? metadata!.date.replace("T", " ")
                     : "未读取到拍摄时间"}
                 </span>
                 <span>
                   <Camera size={15} />
-                  {current.meta.camera || "未读取到相机信息"}
+                  {metadata!.camera || "未读取到相机信息"}
                 </span>
                 <span>
                   <MapPin size={15} />
-                  {current.meta.place || "未读取到拍摄地点"}
+                  {metadata!.place || "未读取到拍摄地点"}
                 </span>
               </div>
-              {!current.meta.date && (
+              {!metadata!.date && (
                 <p className="metadata-tip">
-                  这张照片可能经过精修或转存，没有保留拍摄时间。可在右侧补填，文件保存时间不会被当作拍摄时间。
+                  未读取到拍摄时间。可以补充这张照片的原图自动读取，也可以在水印内容中手动填写。
                 </p>
               )}
               {showInfo && (
@@ -721,15 +821,24 @@ export default function App() {
                       {mb(current.file.size)}
                     </dd>
                     <dt>日期来源</dt>
-                    <dd>{current.meta.source}</dd>
-                    {Object.entries(current.meta.raw).map(([k, v]) => (
+                    <dd>
+                      {metadata!.source}
+                      {current.metadataReference?.meta.date &&
+                        ` · ${current.metadataReference.name}`}
+                    </dd>
+                    {Object.entries(metadata!.raw).map(([k, v]) => (
                       <div className="metadata-row" key={k}>
                         <dt>{k}</dt>
                         <dd>{v}</dd>
                       </div>
                     ))}
                   </dl>
-                  <p>只读取照片自带的位置名称或 GPS 坐标，不联网查询地址。</p>
+                  <p>
+                    {current.metadataReference
+                      ? "以上原始字段来自关联原图。"
+                      : ""}
+                    只读取照片自带的位置名称或 GPS 坐标，不联网查询地址。
+                  </p>
                 </div>
               )}
             </section>
@@ -809,7 +918,7 @@ export default function App() {
                 type="datetime-local"
                 step="1"
                 disabled={!current || locked}
-                value={current ? (current.date ?? current.meta.date) : ""}
+                value={current ? (current.date ?? metadata!.date) : ""}
                 onInput={(e) => editPhoto("date", e.currentTarget.value)}
                 onChange={(e) => editPhoto("date", e.target.value)}
               />
@@ -820,7 +929,7 @@ export default function App() {
                 disabled={!current || locked}
                 maxLength={120}
                 placeholder="例如：九寨沟 · 五花海"
-                value={current ? (current.place ?? current.meta.place) : ""}
+                value={current ? (current.place ?? metadata!.place) : ""}
                 onChange={(e) => editPhoto("place", e.target.value)}
               />
             </label>
@@ -1001,16 +1110,6 @@ export default function App() {
           </div>
         </aside>
       </div>
-      <footer>
-        <span>时光印 · 每张照片，都是时间的落款。</span>
-        <a
-          href="https://github.com/ylsislove/shiguang-mark"
-          target="_blank"
-          rel="noreferrer"
-        >
-          开源项目 <ExternalLink size={11} />
-        </a>
-      </footer>
       {notice && (
         <div className="toast" role="status">
           <Check size={16} />

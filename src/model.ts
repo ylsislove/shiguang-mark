@@ -24,6 +24,7 @@ export interface Photo {
   width: number;
   height: number;
   meta: Metadata;
+  metadataReference?: { name: string; meta: Metadata };
   date?: string;
   place?: string;
 }
@@ -160,16 +161,54 @@ export function metadataFromTags(t: Record<string, unknown> = {}): Metadata {
     raw,
   };
 }
+export function photoMetadata(
+  p: Pick<Photo, "meta" | "metadataReference">,
+): Metadata {
+  const reference = p.metadataReference?.meta;
+  if (!reference) return p.meta;
+  // An original may contain only some fields. Never erase known information
+  // with an empty reference field, or mutate the edited image's own metadata.
+  return {
+    date: reference.date || p.meta.date,
+    place: reference.place || p.meta.place,
+    camera: reference.camera || p.meta.camera,
+    lens: reference.lens || p.meta.lens,
+    params: reference.params || p.meta.params,
+    gps: reference.gps || p.meta.gps,
+    source: reference.date ? reference.source : p.meta.source,
+    raw: reference.raw,
+  };
+}
+export function hasPhotoMetadata(meta: Metadata): boolean {
+  return Boolean(
+    meta.date ||
+      meta.place ||
+      meta.camera ||
+      meta.lens ||
+      meta.params ||
+      meta.gps,
+  );
+}
+export function attachMetadataReference(
+  p: Photo,
+  name: string,
+  meta: Metadata,
+): Photo {
+  if (!hasPhotoMetadata(meta))
+    throw new Error(
+      "这张原图没有可读取的拍摄信息，请换一张原始照片或手动补填。现有信息保持不变。",
+    );
+  return { ...p, metadataReference: { name, meta } };
+}
 export function watermarkLines(
-  p: Pick<Photo, "meta" | "date" | "place">,
+  p: Pick<Photo, "meta" | "metadataReference" | "date" | "place">,
   s: Settings,
 ): string[] {
-  const date = s.showDate
-    ? formatDate(p.date ?? p.meta.date, s.dateFormat)
-    : "";
-  const place = s.showPlace ? (p.place ?? p.meta.place) : "";
-  const camera = s.showCamera ? p.meta.camera : "";
-  const params = s.showParams ? p.meta.params : "";
+  const meta = photoMetadata(p);
+  const date = s.showDate ? formatDate(p.date ?? meta.date, s.dateFormat) : "";
+  const place = s.showPlace ? (p.place ?? meta.place) : "";
+  const camera = s.showCamera ? meta.camera : "";
+  const params = s.showParams ? meta.params : "";
   return [date, place, camera, params, s.caption.trim()]
     .filter(Boolean)
     .map((t) => t.slice(0, 180));

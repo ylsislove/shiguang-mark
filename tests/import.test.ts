@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
-import exifr from "exifr";
-import { folderFiles, isPhoto, type DirectoryHandle } from "../src/photos";
-import { metadataFromTags } from "../src/model";
+import {
+  folderFiles,
+  isPhoto,
+  readMetadata,
+  type DirectoryHandle,
+} from "../src/photos";
 
 describe("照片导入集成", () => {
   it("从真实 TIFF EXIF 字节提取当地拍摄日期", async () => {
@@ -21,8 +24,11 @@ describe("照片导入集成", () => {
     v.setUint32(32, 20, true);
     v.setUint32(36, 44, true);
     t.set(new TextEncoder().encode("2022:02:16 09:52:07\0"), 44);
-    const tags = await exifr.parse(t, { reviveValues: false });
-    expect(metadataFromTags(tags).date).toBe("2022-02-16T09:52:07");
+    const meta = await readMetadata(t);
+    expect(meta.date).toBe("2022-02-16T09:52:07");
+  });
+  it("无法读取的原图返回空信息，不需要解码像素", async () => {
+    expect((await readMetadata(new Uint8Array([1, 2, 3]))).date).toBe("");
   });
   it("递归检索文件夹并忽略非照片", async () => {
     const file = (name: string) => ({

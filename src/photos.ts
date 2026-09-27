@@ -1,10 +1,29 @@
 import exifr from "exifr";
-import { metadataFromTags, type Photo } from "./model";
+import { metadataFromTags, type Metadata, type Photo } from "./model";
 export const isPhoto = (f: File) =>
   /\.(jpe?g|png|webp|avif|heic|heif)$/i.test(f.name);
-export async function decode(
-  file: File,
-): Promise<{
+export const isMetadataPhoto = (f: File) =>
+  isPhoto(f) || /\.tiff?$/i.test(f.name);
+
+// Reading reference metadata does not require decoding its pixels. For example,
+// a HEIC original can supply EXIF even when this browser cannot preview HEIC.
+export async function readMetadata(file: File | Uint8Array): Promise<Metadata> {
+  try {
+    const tags = await exifr.parse(file, {
+      tiff: true,
+      exif: true,
+      gps: true,
+      iptc: true,
+      xmp: true,
+      reviveValues: false,
+      translateValues: true,
+    });
+    return metadataFromTags(tags || {});
+  } catch {
+    return metadataFromTags({});
+  }
+}
+export async function decode(file: File): Promise<{
   image: CanvasImageSource;
   width: number;
   height: number;
@@ -67,21 +86,7 @@ export async function readPhoto(
     c.height = Math.round(d.height * sc);
     c.getContext("2d")!.drawImage(d.image, 0, 0, c.width, c.height);
     thumb = URL.createObjectURL(await canvasBlob(c, "image/jpeg", 0.8));
-    let tags = {};
-    try {
-      tags =
-        (await exifr.parse(file, {
-          tiff: true,
-          exif: true,
-          gps: true,
-          iptc: true,
-          xmp: true,
-          reviveValues: false,
-          translateValues: true,
-        })) || {};
-    } catch {
-      /* A decodable photo remains usable even without readable metadata. */
-    }
+    const meta = await readMetadata(file);
     return {
       id: crypto.randomUUID(),
       file,
@@ -89,7 +94,7 @@ export async function readPhoto(
       thumb,
       width: d.width,
       height: d.height,
-      meta: metadataFromTags(tags),
+      meta,
     };
   } finally {
     d.close();

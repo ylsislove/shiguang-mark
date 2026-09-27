@@ -7,6 +7,9 @@ import {
   anchor,
   exportName,
   defaults,
+  photoMetadata,
+  attachMetadataReference,
+  type Photo,
 } from "../src/model";
 describe("真实拍摄信息与缺失处理", () => {
   it("不把编辑时间当成拍摄时间", () => {
@@ -82,5 +85,69 @@ describe("原图比例水印位置与批量文件名", () => {
     expect(a).not.toContain("/");
     expect(a.endsWith(".jpg")).toBe(true);
     expect(a).not.toBe(exportName("../a/雪山.png", 1, "image/jpeg"));
+  });
+});
+
+describe("精修照片补充原图信息", () => {
+  const edited = (id: string): Photo => ({
+    id,
+    file: new File(["edited pixels"], `${id}.png`),
+    path: `${id}.png`,
+    thumb: "blob:edited",
+    width: 1448,
+    height: 1086,
+    meta: metadataFromTags({ City: "精修照片已有地点" }),
+  });
+  const source = metadataFromTags({
+    DateTimeOriginal: "2022:02:16 09:56:00",
+    Make: "HUAWEI",
+    Model: "NOH-AN01",
+    ISO: 50,
+  });
+  it("原图日期和相机信息用于水印，导出仍引用精修文件和尺寸", () => {
+    const p = edited("a"),
+      linked = attachMetadataReference(p, "original.jpg", source);
+    expect(watermarkLines(linked, { ...defaults, showCamera: true })).toEqual([
+      "2022.02.16",
+      "精修照片已有地点",
+      "HUAWEI NOH-AN01",
+    ]);
+    expect(linked.file).toBe(p.file);
+    expect([linked.width, linked.height]).toEqual([1448, 1086]);
+    expect(p.meta.date).toBe("");
+  });
+  it("手动填写或清空优先，恢复读取值后使用原图信息", () => {
+    const p = attachMetadataReference(
+      { ...edited("a"), date: "2020-01-02", place: "" },
+      "original.jpg",
+      source,
+    );
+    expect(watermarkLines(p, defaults)).toEqual(["2020.01.02"]);
+    expect(
+      watermarkLines({ ...p, date: undefined, place: undefined }, defaults),
+    ).toEqual(["2022.02.16", "精修照片已有地点"]);
+  });
+  it("只绑定目标照片，替换和移除关联不会残留旧原图信息", () => {
+    const a = edited("a"),
+      b = edited("b");
+    const linked = attachMetadataReference(a, "one.jpg", source);
+    const replaced = attachMetadataReference(
+      linked,
+      "two.jpg",
+      metadataFromTags({ DateTimeOriginal: "2023:05:20 12:30:00" }),
+    );
+    expect(photoMetadata(b).date).toBe("");
+    expect(photoMetadata(replaced).date).toBe("2023-05-20T12:30:00");
+    expect(photoMetadata(replaced).camera).toBe("");
+    expect(
+      photoMetadata({ ...replaced, metadataReference: undefined }),
+    ).toEqual(a.meta);
+  });
+  it("无信息的原图不能覆盖已有的关联", () => {
+    const p = attachMetadataReference(edited("a"), "original.jpg", source);
+    expect(() =>
+      attachMetadataReference(p, "stripped.png", metadataFromTags({})),
+    ).toThrow("没有可读取的拍摄信息");
+    expect(photoMetadata(p).date).toBe("2022-02-16T09:56:00");
   });
 });
